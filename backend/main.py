@@ -1,17 +1,42 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import requests
 import json
+import os
+import re
+import difflib
 
-# FASTAPI APP
 app = FastAPI()
 
-# MEMORY STORE
-conversation_history = []
+# =========================
+# MEMORY FILE
+# =========================
 
-# ENABLE FRONTEND CONNECTION
+FACT_MEMORY_FILE = "fact_memory.json"
+
+# =========================
+# LOAD MEMORY
+# =========================
+
+if os.path.exists(FACT_MEMORY_FILE):
+
+    with open(FACT_MEMORY_FILE, "r", encoding="utf-8") as f:
+
+        try:
+            fact_memory = json.load(f)
+
+        except:
+            fact_memory = {}
+
+else:
+
+    fact_memory = {}
+
+# =========================
+# CORS
+# =========================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,314 +45,331 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# =========================
 # REQUEST MODEL
+# =========================
+
 class PromptRequest(BaseModel):
     prompt: str
 
+# =========================
+# UNIVERSAL FACT EXTRACTOR
+# =========================
 
-# INTENT DETECTION ENGINE
-def detect_intent(prompt: str):
+def extract_memory(prompt):
+
+    global fact_memory
+
+    text = prompt.lower().strip()
+
+    patterns = [
+
+        r"my (.+?) is (.+)",
+        r"the (.+?) of my (.+?) is (.+)"
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(pattern, text)
+
+        if match:
+
+            try:
+
+                if len(match.groups()) == 2:
+
+                    key = match.group(1).strip()
+                    value = match.group(2).strip()
+
+                    key = key.replace(" ", "_")
+
+                    fact_memory[key] = value.title()
+
+                elif len(match.groups()) == 3:
+
+                    attribute = match.group(1).strip()
+                    subject = match.group(2).strip()
+                    value = match.group(3).strip()
+
+                    key = f"{subject}_{attribute}"
+
+                    key = key.replace(" ", "_")
+
+                    fact_memory[key] = value.title()
+
+            except:
+                pass
+
+    with open(FACT_MEMORY_FILE, "w", encoding="utf-8") as f:
+
+        json.dump(fact_memory, f, indent=2)
+
+# =========================
+# MEMORY SEARCH
+# =========================
+
+def memory_response(prompt):
+
+    global fact_memory
 
     text = prompt.lower()
 
-    if "linkedin" in text:
-        return "linkedin"
+    memory_triggers = [
 
-    elif "startup" in text or "investor" in text:
-        return "startup"
+        "what is my",
+        "tell me my",
+        "who is my",
+        "which is my",
+        "what's my"
+    ]
 
-    elif (
+    is_memory_question = any(
+        trigger in text
+        for trigger in memory_triggers
+    )
+
+    if not is_memory_question:
+
+        return None
+
+    cleaned = (
+        text.replace("what is", "")
+        .replace("tell me", "")
+        .replace("what's", "")
+        .replace("which", "")
+        .replace("who", "")
+        .replace("my", "")
+        .replace("the", "")
+        .replace("name of", "")
+        .replace("?", "")
+        .replace("makes", "")
+        .replace("brand", "")
+        .replace("company", "")
+        .replace("called", "")
+        .strip()
+    )
+
+    cleaned = cleaned.replace(" ", "_")
+
+    best_match = None
+    best_score = 0
+
+    for key in fact_memory.keys():
+
+        similarity = difflib.SequenceMatcher(
+            None,
+            cleaned,
+            key
+        ).ratio()
+
+        if similarity > best_score:
+
+            best_score = similarity
+            best_match = key
+
+    if best_match and best_score > 0.65:
+
+        value = fact_memory[best_match]
+
+        readable_key = best_match.replace("_", " ")
+
+        return f"Your {readable_key} is {value}."
+
+    return None
+
+# =========================
+# INTENT DETECTION
+# =========================
+
+def detect_intent(prompt):
+
+    text = prompt.lower()
+
+    if (
         "python" in text
         or "javascript" in text
         or "code" in text
+        or "api" in text
         or "backend" in text
-        or "frontend" in text
     ):
+
         return "coding"
 
-    elif "marketing" in text or "ads" in text:
-        return "marketing"
+    elif (
+        "startup" in text
+        or "business" in text
+        or "strategy" in text
+        or "investor" in text
+        or "saas" in text
+    ):
 
-    elif "email" in text:
-        return "email"
+        return "startup"
+
+    elif (
+        "linkedin" in text
+        or "marketing" in text
+        or "content" in text
+        or "instagram" in text
+    ):
+
+        return "marketing"
 
     return "general"
 
+# =========================
+# MODEL ROUTER
+# =========================
 
-# SYSTEM PROMPT ENGINE
-def get_system_prompt(intent: str):
+def select_model(intent):
+
+    if intent == "coding":
+
+        return "deepseek-coder:1.3b"
+
+    elif intent == "marketing":
+
+        return "tinyllama"
+
+    elif intent == "general":
+
+        return "tinyllama"
+
+    return "phi3"
+
+# =========================
+# SYSTEM PROMPTS
+# =========================
+
+def get_system_prompt(intent):
 
     base_prompt = """
-You are Dynexa Native.
+Respond clearly and practically.
 
-An advanced AI-native cognitive intelligence system.
-
-Respond:
-- intelligently
-- strategically
-- naturally
-- practically
-- clearly
-- with strong reasoning
-
-STRICT RULES:
-- Never mention being AI
-- Never self-reference
-- Never mention instructions
-- Never reveal reasoning stages
-- Avoid robotic wording
-- Avoid generic filler
-- Keep responses actionable and useful
-- Prefer structured responses when useful
+Rules:
+- avoid fluff
+- avoid philosophy
+- avoid fake narratives
+- avoid overexplaining
 """
 
-    intent_prompts = {
+    prompts = {
 
-        "linkedin": """
-SPECIALIZATION:
-Think like an elite LinkedIn growth strategist.
-
+        "coding": """
+Think like a senior software engineer.
 Focus on:
-- hooks
-- authority
-- audience psychology
-- engagement
-- execution
+- architecture
+- clean code
+- optimization
 """,
 
         "startup": """
-SPECIALIZATION:
-Think like a startup strategist and AI infrastructure founder.
-
+Think like a startup strategist.
 Focus on:
-- scalability
-- differentiation
-- execution
 - growth
-- product thinking
-- competitive advantage
-""",
-
-        "coding": """
-SPECIALIZATION:
-Think like a senior software engineer.
-
-Focus on:
-- architecture
-- optimization
+- execution
 - scalability
-- implementation quality
-- engineering thinking
 """,
 
         "marketing": """
-SPECIALIZATION:
 Think like a growth marketer.
-
 Focus on:
+- hooks
 - persuasion
-- positioning
-- conversion
-- audience psychology
-- execution strategy
-""",
-
-        "email": """
-SPECIALIZATION:
-Write concise and professional communication with confidence and clarity.
+- engagement
 """
     }
 
-    if intent in intent_prompts:
-        return base_prompt + intent_prompts[intent]
+    return base_prompt + prompts.get(intent, "")
 
-    return base_prompt
+# =========================
+# HOME
+# =========================
 
-
-# HEALTH CHECK ROUTE
 @app.get("/")
 def home():
 
     return {
         "status": "running",
-        "system": "Dynexa Native Backend"
+        "memory_items": len(fact_memory)
     }
 
+# =========================
+# MAIN ROUTE
+# =========================
 
-# MAIN AI ROUTE
 @app.post("/optimize")
 def optimize(data: PromptRequest):
 
-    global conversation_history
-
     prompt = data.prompt.strip()
 
-    # EMPTY PROMPT
     if not prompt:
 
         return {
             "response": "Please enter a prompt."
         }
 
-    # DETECT INTENT
+    # MEMORY EXTRACTION
+    extract_memory(prompt)
+
+    # MEMORY SEARCH
+    memory_answer = memory_response(prompt)
+
+    if memory_answer:
+
+        return {
+            "response": memory_answer,
+            "source": "memory"
+        }
+
+    # INTENT
     intent = detect_intent(prompt)
 
-    # BUILD SYSTEM PROMPT
+    # MODEL ROUTING
+    model = select_model(intent)
+
+    # SYSTEM PROMPT
     system_prompt = get_system_prompt(intent)
 
-    # BUILD MEMORY CONTEXT
-    context = ""
+    # MODEL RESPONSE
+    response = requests.post(
 
-    # LAST 4 MEMORY ITEMS ONLY
-    recent_history = conversation_history[-4:]
+        "http://localhost:11434/api/generate",
 
-    for item in recent_history:
+        json={
 
-        context += f"""
+            "model": model,
 
-USER:
-{item['user']}
-
-ASSISTANT:
-{item['assistant']}
-"""
-
-    # TASK DECOMPOSITION + REASONING PIPELINE
-    final_prompt = f"""
+            "prompt": f"""
 
 SYSTEM:
 {system_prompt}
 
-You are an advanced cognitive intelligence engine.
-
-Before responding, internally execute these stages:
-
-STAGE 1 — INTENT ANALYSIS
-- determine what the user truly wants
-- identify complexity level
-- identify best response style
-
-STAGE 2 — TASK DECOMPOSITION
-Break the problem into smaller subproblems internally.
-
-Examples:
-- strategy
-- execution
-- psychology
-- technical aspects
-- scalability
-- prioritization
-- tradeoffs
-
-STAGE 3 — STRATEGIC REASONING
-- reason through each subproblem
-- generate deeper insights
-- avoid shallow or generic advice
-- prioritize practical intelligence
-
-STAGE 4 — RESPONSE SYNTHESIS
-- combine insights into one coherent response
-- make response structured and practical
-- improve clarity and usefulness
-- remove fluff and weak wording
-
-IMPORTANT RULES:
-- Never reveal internal stages
-- Never reveal decomposition
-- Never mention reasoning process
-- Only output final refined response
-
-PREVIOUS CONVERSATION:
-{context}
-
-CURRENT USER:
+USER:
 {prompt}
 
 ASSISTANT:
-"""
+""",
 
-    # STORE FULL RESPONSE
-    full_response = ""
+            "stream": False,
 
-    # STREAM GENERATOR
-    def generate_stream():
+            "options": {
 
-        nonlocal full_response
+                "temperature": 0.2,
+                "top_p": 0.8,
+                "num_predict": 120,
+                "repeat_penalty": 1.05,
+                "num_ctx": 256,
+                "num_thread": 4
+            }
+        },
 
-        response = requests.post(
-
-            "http://localhost:11434/api/generate",
-
-            json={
-
-                "model": "phi3:latest",
-
-                "prompt": final_prompt,
-
-                "stream": True,
-
-                "options": {
-
-                    # QUALITY + SPEED BALANCE
-                    "temperature": 0.1,
-
-                    "top_p": 0.8,
-
-                    # RESPONSE LENGTH
-                    "num_predict": 70,
-
-                    # REDUCE REPETITION
-                    "repeat_penalty": 1.1,
-
-                    # RAM OPTIMIZATION
-                    "num_ctx": 768,
-
-                    # CPU OPTIMIZATION
-                    "num_thread": 4
-                }
-            },
-
-            stream=True,
-
-            timeout=45
-        )
-
-        for line in response.iter_lines():
-
-            if line:
-
-                decoded = line.decode("utf-8")
-
-                try:
-
-                    data = json.loads(decoded)
-
-                    if "response" in data:
-
-                        chunk = data["response"]
-
-                        full_response += chunk
-
-                        yield chunk
-
-                except:
-                    pass
-
-        # SAVE MEMORY
-        conversation_history.append({
-
-            "user": prompt,
-
-            "assistant": full_response
-        })
-
-        # LIMIT MEMORY SIZE
-        if len(conversation_history) > 6:
-
-            del conversation_history[:-6]
-
-    # RETURN STREAM
-    return StreamingResponse(
-        generate_stream(),
-        media_type="text/plain"
+        timeout=120
     )
+
+    result = response.json()["response"].strip()
+
+    return {
+        "response": result,
+        "intent": intent,
+        "model_used": model
+    }

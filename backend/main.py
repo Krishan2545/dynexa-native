@@ -5,7 +5,15 @@ import requests
 import json
 import os
 import re
-import difflib
+from dotenv import load_dotenv
+
+# =========================
+# LOAD ENV
+# =========================
+
+load_dotenv()
+
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 app = FastAPI()
 
@@ -53,7 +61,253 @@ class PromptRequest(BaseModel):
     prompt: str
 
 # =========================
-# UNIVERSAL FACT EXTRACTOR
+# CALCULATOR TOOL
+# =========================
+
+def calculator_tool(prompt):
+
+    try:
+
+        expression = re.findall(
+            r'[\d\.\+\-\*\/\(\) ]+',
+            prompt
+        )[0]
+
+        result = eval(expression)
+
+        return f"Calculation result: {result}"
+
+    except:
+
+        return None
+
+# =========================
+# DUCK SEARCH
+# =========================
+
+def duck_search(query):
+
+    try:
+
+        url = "https://api.duckduckgo.com/"
+
+        params = {
+
+            "q": query,
+            "format": "json",
+            "no_redirect": 1,
+            "no_html": 1
+        }
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        data = response.json()
+
+        abstract = data.get("AbstractText")
+
+        if abstract:
+
+            return abstract
+
+        related = data.get("RelatedTopics")
+
+        if related:
+
+            for item in related:
+
+                if isinstance(item, dict):
+
+                    text = item.get("Text")
+
+                    if text:
+
+                        return text
+
+        return "No results found."
+
+    except Exception as e:
+
+        return f"Search failed: {str(e)}"
+
+# =========================
+# SERPER SEARCH
+# =========================
+
+def serper_search(query):
+
+    try:
+
+        url = "https://google.serper.dev/search"
+
+        payload = json.dumps({
+            "q": query
+        })
+
+        headers = {
+            'X-API-KEY': SERPER_API_KEY,
+            'Content-Type': 'application/json'
+        }
+
+        response = requests.post(
+            url,
+            headers=headers,
+            data=payload,
+            timeout=20
+        )
+
+        data = response.json()
+
+        organic = data.get("organic", [])
+
+        if organic:
+
+            results = []
+
+            for item in organic[:5]:
+
+                title = item.get("title", "")
+                snippet = item.get("snippet", "")
+
+                results.append(
+                    f"{title}\n{snippet}"
+                )
+
+            return "\n\n".join(results)
+
+        return "No internet results found."
+
+    except Exception as e:
+
+        return f"Serper search failed: {str(e)}"
+
+# =========================
+# RETRIEVAL ROUTER
+# =========================
+
+def retrieval_router(prompt):
+
+    text = prompt.lower()
+
+    live_keywords = [
+
+        "latest",
+        "today",
+        "news",
+        "price",
+        "stock",
+        "recent",
+        "current",
+        "update"
+    ]
+
+    if any(keyword in text for keyword in live_keywords):
+
+        return "serper"
+
+    return "duck"
+
+# =========================
+# SYNTHESIS ENGINE
+# =========================
+
+def synthesize_response(user_prompt, retrieved_context):
+
+    synthesis_prompt = f"""
+
+You are Dynexa.
+
+Your job:
+- answer the user directly
+- summarize clearly
+- avoid clutter
+- avoid raw snippets
+- keep response concise
+- first line should answer user immediately
+
+USER QUESTION:
+{user_prompt}
+
+RETRIEVED CONTEXT:
+{retrieved_context}
+
+FINAL ANSWER:
+"""
+
+    response = requests.post(
+
+        "http://localhost:11434/api/generate",
+
+        json={
+
+            "model": "phi3",
+
+            "prompt": synthesis_prompt,
+
+            "stream": False,
+
+            "options": {
+
+                "temperature": 0.2,
+
+                "num_predict": 120,
+
+                "top_p": 0.8
+            }
+        },
+
+        timeout=120
+    )
+
+    return response.json()["response"].strip()
+
+# =========================
+# TOOL ROUTER
+# =========================
+
+def tool_router(prompt):
+
+    text = prompt.lower()
+
+    math_symbols = [
+        "+",
+        "-",
+        "*",
+        "/"
+    ]
+
+    if any(symbol in text for symbol in math_symbols):
+
+        return "calculator"
+
+    if "calculate" in text:
+
+        return "calculator"
+
+    retrieval_keywords = [
+
+        "latest",
+        "today",
+        "news",
+        "price",
+        "stock",
+        "current",
+        "recent",
+        "update",
+        "search"
+    ]
+
+    if any(keyword in text for keyword in retrieval_keywords):
+
+        return "retrieval"
+
+    return None
+
+# =========================
+# MEMORY EXTRACTION
 # =========================
 
 def extract_memory(prompt):
@@ -105,181 +359,20 @@ def extract_memory(prompt):
         json.dump(fact_memory, f, indent=2)
 
 # =========================
-# MEMORY SEARCH
+# MEMORY RESPONSE
 # =========================
 
 def memory_response(prompt):
 
-    global fact_memory
-
     text = prompt.lower()
 
-    memory_triggers = [
+    if "car" in text:
 
-        "what is my",
-        "tell me my",
-        "who is my",
-        "which is my",
-        "what's my"
-    ]
+        if "car_brand" in fact_memory:
 
-    is_memory_question = any(
-        trigger in text
-        for trigger in memory_triggers
-    )
-
-    if not is_memory_question:
-
-        return None
-
-    cleaned = (
-        text.replace("what is", "")
-        .replace("tell me", "")
-        .replace("what's", "")
-        .replace("which", "")
-        .replace("who", "")
-        .replace("my", "")
-        .replace("the", "")
-        .replace("name of", "")
-        .replace("?", "")
-        .replace("makes", "")
-        .replace("brand", "")
-        .replace("company", "")
-        .replace("called", "")
-        .strip()
-    )
-
-    cleaned = cleaned.replace(" ", "_")
-
-    best_match = None
-    best_score = 0
-
-    for key in fact_memory.keys():
-
-        similarity = difflib.SequenceMatcher(
-            None,
-            cleaned,
-            key
-        ).ratio()
-
-        if similarity > best_score:
-
-            best_score = similarity
-            best_match = key
-
-    if best_match and best_score > 0.65:
-
-        value = fact_memory[best_match]
-
-        readable_key = best_match.replace("_", " ")
-
-        return f"Your {readable_key} is {value}."
+            return f"Your car brand is {fact_memory['car_brand']}."
 
     return None
-
-# =========================
-# INTENT DETECTION
-# =========================
-
-def detect_intent(prompt):
-
-    text = prompt.lower()
-
-    if (
-        "python" in text
-        or "javascript" in text
-        or "code" in text
-        or "api" in text
-        or "backend" in text
-    ):
-
-        return "coding"
-
-    elif (
-        "startup" in text
-        or "business" in text
-        or "strategy" in text
-        or "investor" in text
-        or "saas" in text
-    ):
-
-        return "startup"
-
-    elif (
-        "linkedin" in text
-        or "marketing" in text
-        or "content" in text
-        or "instagram" in text
-    ):
-
-        return "marketing"
-
-    return "general"
-
-# =========================
-# MODEL ROUTER
-# =========================
-
-def select_model(intent):
-
-    if intent == "coding":
-
-        return "deepseek-coder:1.3b"
-
-    elif intent == "marketing":
-
-        return "tinyllama"
-
-    elif intent == "general":
-
-        return "tinyllama"
-
-    return "phi3"
-
-# =========================
-# SYSTEM PROMPTS
-# =========================
-
-def get_system_prompt(intent):
-
-    base_prompt = """
-Respond clearly and practically.
-
-Rules:
-- avoid fluff
-- avoid philosophy
-- avoid fake narratives
-- avoid overexplaining
-"""
-
-    prompts = {
-
-        "coding": """
-Think like a senior software engineer.
-Focus on:
-- architecture
-- clean code
-- optimization
-""",
-
-        "startup": """
-Think like a startup strategist.
-Focus on:
-- growth
-- execution
-- scalability
-""",
-
-        "marketing": """
-Think like a growth marketer.
-Focus on:
-- hooks
-- persuasion
-- engagement
-"""
-    }
-
-    return base_prompt + prompts.get(intent, "")
 
 # =========================
 # HOME
@@ -289,7 +382,9 @@ Focus on:
 def home():
 
     return {
+
         "status": "running",
+
         "memory_items": len(fact_memory)
     }
 
@@ -308,10 +403,61 @@ def optimize(data: PromptRequest):
             "response": "Please enter a prompt."
         }
 
-    # MEMORY EXTRACTION
+    # =========================
+    # TOOL ROUTING
+    # =========================
+
+    tool = tool_router(prompt)
+
+    # =========================
+    # CALCULATOR
+    # =========================
+
+    if tool == "calculator":
+
+        result = calculator_tool(prompt)
+
+        if result:
+
+            return {
+                "response": result,
+                "tool_used": "calculator"
+            }
+
+    # =========================
+    # RETRIEVAL ENGINE
+    # =========================
+
+    if tool == "retrieval":
+
+        retrieval_source = retrieval_router(prompt)
+
+        if retrieval_source == "serper":
+
+            retrieved_context = serper_search(prompt)
+
+        else:
+
+            retrieved_context = duck_search(prompt)
+
+        final_answer = synthesize_response(
+            prompt,
+            retrieved_context
+        )
+
+        return {
+
+            "response": final_answer,
+
+            "retrieval_source": retrieval_source
+        }
+
+    # =========================
+    # MEMORY
+    # =========================
+
     extract_memory(prompt)
 
-    # MEMORY SEARCH
     memory_answer = memory_response(prompt)
 
     if memory_answer:
@@ -321,33 +467,27 @@ def optimize(data: PromptRequest):
             "source": "memory"
         }
 
-    # INTENT
-    intent = detect_intent(prompt)
+    # =========================
+    # DEFAULT MODEL
+    # =========================
 
-    # MODEL ROUTING
-    model = select_model(intent)
-
-    # SYSTEM PROMPT
-    system_prompt = get_system_prompt(intent)
-
-    # MODEL RESPONSE
     response = requests.post(
 
         "http://localhost:11434/api/generate",
 
         json={
 
-            "model": model,
+            "model": "phi3",
 
             "prompt": f"""
+You are Dynexa.
 
-SYSTEM:
-{system_prompt}
+Give direct concise useful answers.
 
-USER:
+User:
 {prompt}
 
-ASSISTANT:
+Assistant:
 """,
 
             "stream": False,
@@ -355,11 +495,8 @@ ASSISTANT:
             "options": {
 
                 "temperature": 0.2,
-                "top_p": 0.8,
-                "num_predict": 120,
-                "repeat_penalty": 1.05,
-                "num_ctx": 256,
-                "num_thread": 4
+
+                "num_predict": 120
             }
         },
 
@@ -369,7 +506,6 @@ ASSISTANT:
     result = response.json()["response"].strip()
 
     return {
-        "response": result,
-        "intent": intent,
-        "model_used": model
+
+        "response": result
     }

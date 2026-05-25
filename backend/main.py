@@ -6,6 +6,7 @@ import json
 import os
 import re
 from dotenv import load_dotenv
+from datetime import datetime
 
 # =========================
 # LOAD ENV
@@ -18,13 +19,15 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 app = FastAPI()
 
 # =========================
-# MEMORY FILE
+# MEMORY FILES
 # =========================
 
 FACT_MEMORY_FILE = "fact_memory.json"
 
+CONTEXT_MEMORY_FILE = "context_memory.json"
+
 # =========================
-# LOAD MEMORY
+# LOAD FACT MEMORY
 # =========================
 
 if os.path.exists(FACT_MEMORY_FILE):
@@ -40,6 +43,24 @@ if os.path.exists(FACT_MEMORY_FILE):
 else:
 
     fact_memory = {}
+
+# =========================
+# LOAD CONTEXT MEMORY
+# =========================
+
+if os.path.exists(CONTEXT_MEMORY_FILE):
+
+    with open(CONTEXT_MEMORY_FILE, "r", encoding="utf-8") as f:
+
+        try:
+            context_memory = json.load(f)
+
+        except:
+            context_memory = []
+
+else:
+
+    context_memory = []
 
 # =========================
 # CORS
@@ -59,6 +80,61 @@ app.add_middleware(
 
 class PromptRequest(BaseModel):
     prompt: str
+
+# =========================
+# SAVE CONTEXT
+# =========================
+
+def save_context(user_prompt, assistant_response):
+
+    global context_memory
+
+    context_entry = {
+
+        "timestamp": str(datetime.now()),
+
+        "user": user_prompt,
+
+        "assistant": assistant_response
+    }
+
+    context_memory.append(context_entry)
+
+    # KEEP LAST 20 CONVERSATIONS
+
+    context_memory = context_memory[-20:]
+
+    with open(CONTEXT_MEMORY_FILE, "w", encoding="utf-8") as f:
+
+        json.dump(context_memory, f, indent=2)
+
+# =========================
+# GET RECENT CONTEXT
+# =========================
+
+def get_recent_context():
+
+    if not context_memory:
+
+        return ""
+
+    recent_items = context_memory[-5:]
+
+    context_text = ""
+
+    for item in recent_items:
+
+        context_text += f"""
+
+User:
+{item['user']}
+
+Assistant:
+{item['assistant']}
+
+"""
+
+    return context_text
 
 # =========================
 # CALCULATOR TOOL
@@ -216,17 +292,21 @@ def retrieval_router(prompt):
 
 def synthesize_response(user_prompt, retrieved_context):
 
+    recent_context = get_recent_context()
+
     synthesis_prompt = f"""
 
 You are Dynexa.
 
 Your job:
-- answer the user directly
-- summarize clearly
+- answer directly
+- use recent conversation context if relevant
 - avoid clutter
-- avoid raw snippets
-- keep response concise
-- first line should answer user immediately
+- summarize clearly
+- be concise
+
+RECENT CONTEXT:
+{recent_context}
 
 USER QUESTION:
 {user_prompt}
@@ -253,7 +333,7 @@ FINAL ANSWER:
 
                 "temperature": 0.2,
 
-                "num_predict": 120,
+                "num_predict": 150,
 
                 "top_p": 0.8
             }
@@ -366,6 +446,12 @@ def memory_response(prompt):
 
     text = prompt.lower()
 
+    if "startup" in text:
+
+        if "startup" in fact_memory:
+
+            return f"Your startup is {fact_memory['startup']}."
+
     if "car" in text:
 
         if "car_brand" in fact_memory:
@@ -385,7 +471,9 @@ def home():
 
         "status": "running",
 
-        "memory_items": len(fact_memory)
+        "fact_memory_items": len(fact_memory),
+
+        "context_items": len(context_memory)
     }
 
 # =========================
@@ -409,24 +497,20 @@ def optimize(data: PromptRequest):
 
     tool = tool_router(prompt)
 
-    # =========================
     # CALCULATOR
-    # =========================
 
     if tool == "calculator":
 
         result = calculator_tool(prompt)
 
-        if result:
+        save_context(prompt, result)
 
-            return {
-                "response": result,
-                "tool_used": "calculator"
-            }
+        return {
+            "response": result,
+            "tool_used": "calculator"
+        }
 
-    # =========================
-    # RETRIEVAL ENGINE
-    # =========================
+    # RETRIEVAL
 
     if tool == "retrieval":
 
@@ -445,6 +529,8 @@ def optimize(data: PromptRequest):
             retrieved_context
         )
 
+        save_context(prompt, final_answer)
+
         return {
 
             "response": final_answer,
@@ -462,14 +548,33 @@ def optimize(data: PromptRequest):
 
     if memory_answer:
 
+        save_context(prompt, memory_answer)
+
         return {
             "response": memory_answer,
             "source": "memory"
         }
 
     # =========================
-    # DEFAULT MODEL
+    # CONTEXT-AWARE RESPONSE
     # =========================
+
+    recent_context = get_recent_context()
+
+    final_prompt = f"""
+
+You are Dynexa.
+
+Use recent conversation context if relevant.
+
+RECENT CONTEXT:
+{recent_context}
+
+USER:
+{prompt}
+
+ASSISTANT:
+"""
 
     response = requests.post(
 
@@ -479,16 +584,7 @@ def optimize(data: PromptRequest):
 
             "model": "phi3",
 
-            "prompt": f"""
-You are Dynexa.
-
-Give direct concise useful answers.
-
-User:
-{prompt}
-
-Assistant:
-""",
+            "prompt": final_prompt,
 
             "stream": False,
 
@@ -496,7 +592,7 @@ Assistant:
 
                 "temperature": 0.2,
 
-                "num_predict": 120
+                "num_predict": 150
             }
         },
 
@@ -504,6 +600,8 @@ Assistant:
     )
 
     result = response.json()["response"].strip()
+
+    save_context(prompt, result)
 
     return {
 

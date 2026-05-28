@@ -16,6 +16,10 @@ load_dotenv()
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
+# =========================
+# FASTAPI
+# =========================
+
 app = FastAPI()
 
 # =========================
@@ -23,7 +27,6 @@ app = FastAPI()
 # =========================
 
 FACT_MEMORY_FILE = "fact_memory.json"
-
 CONTEXT_MEMORY_FILE = "context_memory.json"
 
 # =========================
@@ -36,12 +39,10 @@ if os.path.exists(FACT_MEMORY_FILE):
 
         try:
             fact_memory = json.load(f)
-
         except:
             fact_memory = {}
 
 else:
-
     fact_memory = {}
 
 # =========================
@@ -54,12 +55,10 @@ if os.path.exists(CONTEXT_MEMORY_FILE):
 
         try:
             context_memory = json.load(f)
-
         except:
             context_memory = []
 
 else:
-
     context_memory = []
 
 # =========================
@@ -89,73 +88,95 @@ def save_context(user_prompt, assistant_response):
 
     global context_memory
 
-    context_entry = {
-
+    item = {
         "timestamp": str(datetime.now()),
-
         "user": user_prompt,
-
         "assistant": assistant_response
     }
 
-    context_memory.append(context_entry)
+    context_memory.append(item)
 
-    # KEEP LAST 20 CONVERSATIONS
-
-    context_memory = context_memory[-20:]
+    context_memory = context_memory[-5:]
 
     with open(CONTEXT_MEMORY_FILE, "w", encoding="utf-8") as f:
-
         json.dump(context_memory, f, indent=2)
 
 # =========================
-# GET RECENT CONTEXT
+# GET CONTEXT
 # =========================
 
 def get_recent_context():
 
     if not context_memory:
-
         return ""
 
-    recent_items = context_memory[-5:]
+    recent_items = context_memory[-2:]
 
-    context_text = ""
+    text = ""
 
     for item in recent_items:
 
-        context_text += f"""
+        text += f"""
 
 User:
 {item['user']}
 
 Assistant:
 {item['assistant']}
-
 """
 
-    return context_text
+    return text
 
 # =========================
-# CALCULATOR TOOL
+# MEMORY EXTRACTION
 # =========================
 
-def calculator_tool(prompt):
+def extract_memory(prompt):
 
-    try:
+    global fact_memory
 
-        expression = re.findall(
-            r'[\d\.\+\-\*\/\(\) ]+',
-            prompt
-        )[0]
+    text = prompt.lower().strip()
 
-        result = eval(expression)
+    patterns = [
+        r"my (.+?) is (.+)",
+        r"my (.+?) brand is (.+)"
+    ]
 
-        return f"Calculation result: {result}"
+    for pattern in patterns:
 
-    except:
+        match = re.search(pattern, text)
 
-        return None
+        if match:
+
+            key = match.group(1).strip().replace(" ", "_")
+            value = match.group(2).strip().title()
+
+            fact_memory[key] = value
+
+    with open(FACT_MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(fact_memory, f, indent=2)
+
+# =========================
+# MEMORY RESPONSE
+# =========================
+
+def memory_response(prompt):
+
+    text = prompt.lower()
+
+    if "car" in text and "brand" in text:
+        if "car_brand" in fact_memory:
+            return f"Your car brand is {fact_memory['car_brand']}."
+
+    if "fan" in text and "brand" in text:
+        if "fan_brand" in fact_memory:
+            return f"Your fan brand is {fact_memory['fan_brand']}."
+
+    if "startup" in text:
+        if "startup" in fact_memory:
+            return f"Your startup is {fact_memory['startup']}."
+
+    return None
 
 # =========================
 # DUCK SEARCH
@@ -168,17 +189,15 @@ def duck_search(query):
         url = "https://api.duckduckgo.com/"
 
         params = {
-
             "q": query,
             "format": "json",
-            "no_redirect": 1,
             "no_html": 1
         }
 
         response = requests.get(
             url,
             params=params,
-            timeout=10
+            timeout=8
         )
 
         data = response.json()
@@ -186,28 +205,13 @@ def duck_search(query):
         abstract = data.get("AbstractText")
 
         if abstract:
-
-            return abstract
-
-        related = data.get("RelatedTopics")
-
-        if related:
-
-            for item in related:
-
-                if isinstance(item, dict):
-
-                    text = item.get("Text")
-
-                    if text:
-
-                        return text
+            return abstract[:200]
 
         return "No results found."
 
     except Exception as e:
 
-        return f"Search failed: {str(e)}"
+        return f"Duck Error: {str(e)}"
 
 # =========================
 # SERPER SEARCH
@@ -224,241 +228,124 @@ def serper_search(query):
         })
 
         headers = {
-            'X-API-KEY': SERPER_API_KEY,
-            'Content-Type': 'application/json'
+            "X-API-KEY": SERPER_API_KEY,
+            "Content-Type": "application/json"
         }
 
         response = requests.post(
             url,
             headers=headers,
             data=payload,
-            timeout=20
+            timeout=10
         )
+
+        if response.status_code != 200:
+            return f"Serper API Error: {response.status_code}"
 
         data = response.json()
 
         organic = data.get("organic", [])
 
-        if organic:
+        if not organic:
+            return "No live results found."
 
-            results = []
+        top = organic[0]
 
-            for item in organic[:5]:
+        title = top.get("title", "No title")
+        snippet = top.get("snippet", "No summary")
 
-                title = item.get("title", "")
-                snippet = item.get("snippet", "")
+        snippet = snippet[:120]
 
-                results.append(
-                    f"{title}\n{snippet}"
-                )
+        return f"{title}\n\n{snippet}"
 
-            return "\n\n".join(results)
+    except requests.exceptions.Timeout:
 
-        return "No internet results found."
+        return "Live search timed out."
 
     except Exception as e:
 
-        return f"Serper search failed: {str(e)}"
+        return f"Search system error: {str(e)}"
 
 # =========================
-# RETRIEVAL ROUTER
+# PLANNER
 # =========================
 
-def retrieval_router(prompt):
+def planner_engine(prompt):
 
-    text = prompt.lower()
+    planner_prompt = f"""
 
-    live_keywords = [
+Classify request briefly.
 
-        "latest",
-        "today",
-        "news",
-        "price",
-        "stock",
-        "recent",
-        "current",
-        "update"
-    ]
-
-    if any(keyword in text for keyword in live_keywords):
-
-        return "serper"
-
-    return "duck"
-
-# =========================
-# SYNTHESIS ENGINE
-# =========================
-
-def synthesize_response(user_prompt, retrieved_context):
-
-    recent_context = get_recent_context()
-
-    synthesis_prompt = f"""
-
-You are Dynexa.
-
-Your job:
-- answer directly
-- use recent conversation context if relevant
-- avoid clutter
-- summarize clearly
-- be concise
-
-RECENT CONTEXT:
-{recent_context}
-
-USER QUESTION:
-{user_prompt}
-
-RETRIEVED CONTEXT:
-{retrieved_context}
-
-FINAL ANSWER:
+USER:
+{prompt}
 """
 
-    response = requests.post(
+    try:
 
-        "http://localhost:11434/api/generate",
+        response = requests.post(
 
-        json={
+            "http://localhost:11434/api/generate",
 
-            "model": "phi3",
+            json={
+                "model": "tinyllama",
+                "prompt": planner_prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "num_predict": 15
+                }
+            },
 
-            "prompt": synthesis_prompt,
+            timeout=15
+        )
 
-            "stream": False,
+        return response.json()["response"].strip()
 
-            "options": {
-
-                "temperature": 0.2,
-
-                "num_predict": 150,
-
-                "top_p": 0.8
-            }
-        },
-
-        timeout=120
-    )
-
-    return response.json()["response"].strip()
+    except:
+        return "planner_failed"
 
 # =========================
-# TOOL ROUTER
+# MODEL ROUTER
 # =========================
 
-def tool_router(prompt):
+def route_model(prompt):
 
     text = prompt.lower()
 
-    math_symbols = [
-        "+",
-        "-",
-        "*",
-        "/"
+    coding_keywords = [
+        "code",
+        "python",
+        "fastapi",
+        "javascript",
+        "react",
+        "api",
+        "backend"
     ]
 
-    if any(symbol in text for symbol in math_symbols):
+    if any(word in text for word in coding_keywords):
+        return "deepseek-coder:1.3b"
 
-        return "calculator"
+    return "phi3"
 
-    if "calculate" in text:
+# =========================
+# RETRIEVAL DETECTOR
+# =========================
 
-        return "calculator"
+def needs_retrieval(prompt):
+
+    text = prompt.lower()
 
     retrieval_keywords = [
-
         "latest",
         "today",
         "news",
         "price",
         "stock",
-        "current",
-        "recent",
-        "update",
-        "search"
+        "share",
+        "recent"
     ]
 
-    if any(keyword in text for keyword in retrieval_keywords):
-
-        return "retrieval"
-
-    return None
-
-# =========================
-# MEMORY EXTRACTION
-# =========================
-
-def extract_memory(prompt):
-
-    global fact_memory
-
-    text = prompt.lower().strip()
-
-    patterns = [
-
-        r"my (.+?) is (.+)",
-        r"the (.+?) of my (.+?) is (.+)"
-    ]
-
-    for pattern in patterns:
-
-        match = re.search(pattern, text)
-
-        if match:
-
-            try:
-
-                if len(match.groups()) == 2:
-
-                    key = match.group(1).strip()
-                    value = match.group(2).strip()
-
-                    key = key.replace(" ", "_")
-
-                    fact_memory[key] = value.title()
-
-                elif len(match.groups()) == 3:
-
-                    attribute = match.group(1).strip()
-                    subject = match.group(2).strip()
-                    value = match.group(3).strip()
-
-                    key = f"{subject}_{attribute}"
-
-                    key = key.replace(" ", "_")
-
-                    fact_memory[key] = value.title()
-
-            except:
-                pass
-
-    with open(FACT_MEMORY_FILE, "w", encoding="utf-8") as f:
-
-        json.dump(fact_memory, f, indent=2)
-
-# =========================
-# MEMORY RESPONSE
-# =========================
-
-def memory_response(prompt):
-
-    text = prompt.lower()
-
-    if "startup" in text:
-
-        if "startup" in fact_memory:
-
-            return f"Your startup is {fact_memory['startup']}."
-
-    if "car" in text:
-
-        if "car_brand" in fact_memory:
-
-            return f"Your car brand is {fact_memory['car_brand']}."
-
-    return None
+    return any(word in text for word in retrieval_keywords)
 
 # =========================
 # HOME
@@ -468,11 +355,8 @@ def memory_response(prompt):
 def home():
 
     return {
-
         "status": "running",
-
-        "fact_memory_items": len(fact_memory),
-
+        "memory_items": len(fact_memory),
         "context_items": len(context_memory)
     }
 
@@ -486,57 +370,15 @@ def optimize(data: PromptRequest):
     prompt = data.prompt.strip()
 
     if not prompt:
-
         return {
             "response": "Please enter a prompt."
         }
 
     # =========================
-    # TOOL ROUTING
+    # PLANNER
     # =========================
 
-    tool = tool_router(prompt)
-
-    # CALCULATOR
-
-    if tool == "calculator":
-
-        result = calculator_tool(prompt)
-
-        save_context(prompt, result)
-
-        return {
-            "response": result,
-            "tool_used": "calculator"
-        }
-
-    # RETRIEVAL
-
-    if tool == "retrieval":
-
-        retrieval_source = retrieval_router(prompt)
-
-        if retrieval_source == "serper":
-
-            retrieved_context = serper_search(prompt)
-
-        else:
-
-            retrieved_context = duck_search(prompt)
-
-        final_answer = synthesize_response(
-            prompt,
-            retrieved_context
-        )
-
-        save_context(prompt, final_answer)
-
-        return {
-
-            "response": final_answer,
-
-            "retrieval_source": retrieval_source
-        }
+    planner_engine(prompt)
 
     # =========================
     # MEMORY
@@ -556,19 +398,53 @@ def optimize(data: PromptRequest):
         }
 
     # =========================
-    # CONTEXT-AWARE RESPONSE
+    # LIVE RETRIEVAL
+    # =========================
+
+    if needs_retrieval(prompt):
+
+        live_result = serper_search(prompt)
+
+        save_context(prompt, live_result)
+
+        return {
+            "response": live_result,
+            "source": "live_retrieval",
+            "model_used": "serper"
+        }
+
+    # =========================
+    # CONTEXT
     # =========================
 
     recent_context = get_recent_context()
 
+    short_context = recent_context[:300]
+
+    # =========================
+    # MODEL ROUTING
+    # =========================
+
+    selected_model = route_model(prompt)
+
+    # =========================
+    # FINAL PROMPT
+    # =========================
+
     final_prompt = f"""
 
-You are Dynexa.
+You are Dynexa AI.
 
-Use recent conversation context if relevant.
+You are practical, concise and helpful.
+
+Never say:
+- you are DeepSeek
+- you are Phi3
+- you are TinyLlama
+- you are trained only for coding
 
 RECENT CONTEXT:
-{recent_context}
+{short_context}
 
 USER:
 {prompt}
@@ -581,22 +457,16 @@ ASSISTANT:
         "http://localhost:11434/api/generate",
 
         json={
-
-            "model": "phi3",
-
+            "model": selected_model,
             "prompt": final_prompt,
-
             "stream": False,
-
             "options": {
-
                 "temperature": 0.2,
-
-                "num_predict": 150
+                "num_predict": 40
             }
         },
 
-        timeout=120
+        timeout=60
     )
 
     result = response.json()["response"].strip()
@@ -604,6 +474,6 @@ ASSISTANT:
     save_context(prompt, result)
 
     return {
-
-        "response": result
+        "response": result,
+        "model_used": selected_model
     }

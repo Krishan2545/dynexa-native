@@ -9,5 +9,11 @@
   "laptop_brand": "Lenovo",
   "laptop": "Lenovo",
   "car": "Honda",
-  "startup": "Dynexa"
+  "startup": "Focused On Ai Infrastructure",
+  "phone_brand": "Samsung",
+  "phone": "Samsung",
+  "favorite_language": "Python",
+  "favorite_framework": "Fastapi",
+  "friends_name": "John",
+  "friend's_name": "John"
 }
